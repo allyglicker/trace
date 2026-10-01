@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Trace">
+<meta name="theme-color" content="#0b0f0e">
+<title>Trace</title>
+<style>
+  :root{
+    --ink:#0b0f0e;
+    --glass:rgba(12,17,16,0.62);
+    --glass-edge:rgba(255,255,255,0.10);
+    --accent:#5eead4;      /* soft teal — reads cleanly over warm paper/desk tones */
+    --accent-dim:rgba(94,234,212,0.16);
+    --text:#eef4f2;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;color:var(--text);
+    -webkit-user-select:none;user-select:none;}
+  #stage{position:fixed;inset:0;overflow:hidden;background:#000;}
+  #cam{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;}
+  /* the tracing overlay */
+  #overlayWrap{position:absolute;inset:0;display:none;touch-action:none;}
+  #overlay{position:absolute;top:50%;left:50%;max-width:none;
+    transform-origin:center center;will-change:transform;pointer-events:none;}
+
+  /* ---- start / permission screen ---- */
+  #gate{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:22px;padding:32px;text-align:center;background:radial-gradient(120% 100% at 50% 0%,#12201d,#0b0f0e);z-index:40;}
+  #gate h1{font-size:15px;font-weight:600;letter-spacing:.34em;text-transform:uppercase;margin:0;color:var(--accent);}
+  #gate p{max-width:300px;margin:0;font-size:14px;line-height:1.55;color:rgba(238,244,242,.72);}
+  .primary{appearance:none;border:1px solid var(--accent);background:var(--accent-dim);color:var(--accent);
+    font:600 15px/1 inherit;letter-spacing:.02em;padding:15px 26px;border-radius:14px;cursor:pointer;}
+  .primary:active{transform:scale(.98);}
+  #err{display:none;font-size:13px;line-height:1.5;color:#fca5a5;max-width:300px;}
+
+  /* ---- control dock ---- */
+  #dock{position:fixed;left:0;right:0;bottom:0;z-index:30;
+    padding:12px 14px calc(12px + env(safe-area-inset-bottom));
+    background:linear-gradient(to top,rgba(6,9,8,.78),rgba(6,9,8,0));
+    display:flex;flex-direction:column;gap:10px;transition:opacity .2s,transform .2s;}
+  #dock.hidden{opacity:0;transform:translateY(12px);pointer-events:none;}
+  .sliders{display:flex;flex-direction:column;gap:9px;}
+  .row{display:flex;align-items:center;gap:12px;background:var(--glass);border:1px solid var(--glass-edge);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-radius:13px;padding:9px 13px;}
+  .row label{font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:rgba(238,244,242,.6);width:52px;flex:none;}
+  .row output{font:600 12px/1 var(--mono);color:var(--accent);width:44px;text-align:right;flex:none;}
+  input[type=range]{flex:1;appearance:none;height:3px;border-radius:3px;background:rgba(255,255,255,.18);margin:0;}
+  input[type=range]::-webkit-slider-thumb{appearance:none;width:22px;height:22px;border-radius:50%;
+    background:var(--accent);border:3px solid var(--ink);box-shadow:0 0 0 1px var(--accent);}
+  .buttons{display:flex;gap:8px;}
+  .btn{flex:1;appearance:none;border:1px solid var(--glass-edge);background:var(--glass);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);color:var(--text);
+    font:600 12px/1 inherit;letter-spacing:.02em;padding:13px 8px;border-radius:13px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:6px;}
+  .btn:active{transform:scale(.97);}
+  .btn.on{border-color:var(--accent);color:var(--accent);background:var(--accent-dim);}
+  .btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8;flex:none;}
+
+  /* locked state: everything melts away except a single unlock chip */
+  #lockChip{position:fixed;top:calc(14px + env(safe-area-inset-top));right:14px;z-index:31;display:none;
+    align-items:center;gap:7px;background:var(--glass);border:1px solid var(--accent);color:var(--accent);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    font:600 11px/1 inherit;letter-spacing:.14em;text-transform:uppercase;padding:10px 14px;border-radius:11px;cursor:pointer;}
+  #lockChip svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8;}
+  #hint{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:20;text-align:center;
+    font-size:13px;letter-spacing:.02em;color:rgba(238,244,242,.55);pointer-events:none;padding:0 40px;line-height:1.5;}
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="cam" playsinline muted autoplay></video>
+  <div id="overlayWrap"><img id="overlay" alt=""></div>
+</div>
+
+<div id="hint">Load a photo to start tracing</div>
+
+<!-- locked view -->
+<button id="lockChip">
+  <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0"/></svg>
+  Unlock
+</button>
+
+<!-- controls -->
+<div id="dock">
+  <div class="sliders">
+    <div class="row">
+      <label>Fade</label>
+      <input type="range" id="opacity" min="5" max="100" value="45">
+      <output id="opacityVal">45%</output>
+    </div>
+    <div class="row" id="sensRow" style="display:none">
+      <label>Detail</label>
+      <input type="range" id="sens" min="8" max="90" value="35">
+      <output id="sensVal">35</output>
+    </div>
+  </div>
+  <div class="buttons">
+    <button class="btn" id="loadBtn">
+      <svg viewBox="0 0 24 24"><path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M12 3v13"/><path d="M8 8l4-4 4 4"/></svg>
+      Photo
+    </button>
+    <button class="btn" id="outlineBtn">
+      <svg viewBox="0 0 24 24"><path d="M4 18c3-8 13-8 16 0"/><circle cx="12" cy="7" r="3"/></svg>
+      Outline
+    </button>
+    <button class="btn" id="resetBtn">
+      <svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 1 2.3 5.6"/><path d="M4 20v-5h5"/></svg>
+      Reset
+    </button>
+    <button class="btn" id="lockBtn">
+      <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V6a4 4 0 0 1 8 0v5"/></svg>
+      Lock
+    </button>
+  </div>
+</div>
+
+<input type="file" id="file" accept="image/*" style="position:absolute;left:-9999px" >
+
+<!-- start gate -->
+<div id="gate">
+  <h1>Trace</h1>
+  <p>Point your phone at paper, drop a faint photo on top, and draw what you see. Prop the phone on a stand so it stays still.</p>
+  <button class="primary" id="startBtn">Turn on camera</button>
+  <div id="err"></div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  var video   = document.getElementById('cam');
+  var wrap    = document.getElementById('overlayWrap');
+  var img     = document.getElementById('overlay');
+  var gate    = document.getElementById('gate');
+  var errBox  = document.getElementById('err');
+  var dock    = document.getElementById('dock');
+  var hint    = document.getElementById('hint');
+  var lockChip= document.getElementById('lockChip');
+  var fileIn  = document.getElementById('file');
+
+  // ---------- camera ----------
+  document.getElementById('startBtn').addEventListener('click', startCam);
+  function startCam(){
+    errBox.style.display='none';
+    navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:{ ideal:'environment' } }, audio:false
+    }).then(function(stream){
+      video.srcObject = stream;
+      video.play();
+      gate.style.display='none';
+    }).catch(function(e){
+      errBox.style.display='block';
+      errBox.textContent = "Couldn't open the camera ("+ (e && e.name || 'error') +
+        "). This page must be opened over an https:// link — a file saved to the phone won't get camera access. Host it (see notes) and try again.";
+    });
+  }
+
+  // ---------- image loading + edge detection ----------
+  var photoSrc = null;    // original image dataURL / objectURL
+  var outlineSrc = null;  // cached edge-detected version
+  var gradCache = null;   // {w,h,mag} so the Detail slider re-thresholds instantly
+  var mode = 'photo';
+
+  document.getElementById('loadBtn').addEventListener('click', function(){ fileIn.click(); });
+  document.getElementById('file').addEventListener('change', function(e){
+    var f = e.target.files && e.target.files[0];
+    if(!f) return;
+    var url = URL.createObjectURL(f);
+    var probe = new Image();
+    probe.onload = function(){
+      photoSrc = url; outlineSrc = null; gradCache = null;
+      buildGradients(probe);          // pre-compute edges once
+      mode = 'photo';
+      outlineBtn.classList.remove('on');
+      sensRow.style.display='none';
+      showImage();
+      hint.style.display='none';
+      wrap.style.display='block';
+      resetTransform();
+    };
+    probe.src = url;
+  });
+
+  function showImage(){
+    if(mode==='photo'){ img.src = photoSrc; }
+    else { if(!outlineSrc) renderOutline(); img.src = outlineSrc; }
+  }
+
+  // Sobel edge detection -> transparent PNG with dark lines
+  function buildGradients(image){
+    var max = 1100, w = image.naturalWidth, h = image.naturalHeight;
+    var s = Math.min(1, max/Math.max(w,h)); w = Math.round(w*s); h = Math.round(h*s);
+    var c = document.createElement('canvas'); c.width=w; c.height=h;
+    var cx = c.getContext('2d'); cx.drawImage(image,0,0,w,h);
+    var d = cx.getImageData(0,0,w,h).data;
+    var gray = new Float32Array(w*h);
+    for(var i=0;i<w*h;i++){ gray[i] = 0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2]; }
+    var mag = new Float32Array(w*h), maxM=0;
+    for(var y=1;y<h-1;y++){ for(var x=1;x<w-1;x++){
+      var o=y*w+x;
+      var gx = -gray[o-w-1]-2*gray[o-1]-gray[o+w-1]+gray[o-w+1]+2*gray[o+1]+gray[o+w+1];
+      var gy = -gray[o-w-1]-2*gray[o-w]-gray[o-w+1]+gray[o+w-1]+2*gray[o+w]+gray[o+w+1];
+      var m = Math.sqrt(gx*gx+gy*gy); mag[o]=m; if(m>maxM)maxM=m;
+    }}
+    for(var k=0;k<mag.length;k++){ mag[k] = mag[k]/(maxM||1)*255; }
+    gradCache = {w:w,h:h,mag:mag,canvas:c,ctx:cx};
+  }
+
+  function renderOutline(){
+    if(!gradCache) return;
+    var w=gradCache.w, h=gradCache.h, mag=gradCache.mag;
+    var thr = +document.getElementById('sens').value;       // lower = more lines
+    var out = gradCache.ctx.createImageData(w,h);
+    var od = out.data;
+    for(var i=0;i<w*h;i++){
+      var m = mag[i];
+      var a = m>thr ? Math.min(255, (m-thr)*3) : 0;
+      od[i*4]=0; od[i*4+1]=0; od[i*4+2]=0; od[i*4+3]=a;
+    }
+    gradCache.ctx.putImageData(out,0,0);
+    outlineSrc = gradCache.canvas.toDataURL('image/png');
+  }
+
+  document.getElementById('outlineBtn').addEventListener('click', function(){
+    if(!photoSrc) return;
+    if(mode==='photo'){ mode='outline'; this.classList.add('on'); sensRow.style.display='flex'; renderOutline(); }
+    else { mode='photo'; this.classList.remove('on'); sensRow.style.display='none'; }
+    showImage();
+  });
+  var sensEl = document.getElementById('sens');
+  sensEl.addEventListener('input', function(){
+    document.getElementById('sensVal').textContent = this.value;
+    if(mode==='outline'){ renderOutline(); img.src = outlineSrc; }
+  });
+
+  // ---------- opacity ----------
+  var opEl = document.getElementById('opacity');
+  opEl.addEventListener('input', function(){
+    img.style.opacity = this.value/100;
+    document.getElementById('opacityVal').textContent = this.value+'%';
+  });
+  img.style.opacity = 0.45;
+
+  // ---------- transform (pan / pinch / rotate) ----------
+  var T = {x:0,y:0,scale:1,rot:0};
+  function apply(){ img.style.transform =
+    'translate(-50%,-50%) translate('+T.x+'px,'+T.y+'px) rotate('+T.rot+'deg) scale('+T.scale+')'; }
+  function resetTransform(){ T={x:0,y:0,scale:1,rot:0}; apply(); }
+  document.getElementById('resetBtn').addEventListener('click', resetTransform);
+
+  var pts = {};        // active touches
+  var start = null;
+  wrap.addEventListener('touchstart', function(e){
+    for(var i=0;i<e.changedTouches.length;i++){ var t=e.changedTouches[i]; pts[t.identifier]={x:t.clientX,y:t.clientY}; }
+    beginGesture(e);
+  }, {passive:false});
+  wrap.addEventListener('touchmove', function(e){
+    e.preventDefault();
+    var ids = Object.keys(pts);
+    if(!start) return;
+    if(ids.length===1){
+      var t=e.changedTouches[0];
+      T.x = start.T.x + (t.clientX - start.a.x);
+      T.y = start.T.y + (t.clientY - start.a.y);
+    } else if(ids.length>=2){
+      var a=null,b=null,c=0;
+      for(var i=0;i<e.touches.length && c<2;i++){ if(c===0){a=e.touches[i];}else{b=e.touches[i];} c++; }
+      if(!a||!b) return;
+      var ax=a.clientX,ay=a.clientY,bx=b.clientX,by=b.clientY;
+      var dist=Math.hypot(bx-ax,by-ay), ang=Math.atan2(by-ay,bx-ax)*180/Math.PI;
+      var mx=(ax+bx)/2, my=(ay+by)/2;
+      T.scale = Math.max(0.05, start.T.scale * (dist/start.dist));
+      T.rot   = start.T.rot + (ang - start.ang);
+      T.x     = start.T.x + (mx - start.mid.x);
+      T.y     = start.T.y + (my - start.mid.y);
+    }
+    apply();
+  }, {passive:false});
+  function endTouch(e){
+    for(var i=0;i<e.changedTouches.length;i++){ delete pts[e.changedTouches[i].identifier]; }
+    beginGesture(e);
+  }
+  wrap.addEventListener('touchend', endTouch);
+  wrap.addEventListener('touchcancel', endTouch);
+
+  function beginGesture(e){
+    var ids=Object.keys(pts);
+    if(ids.length===0){ start=null; return; }
+    if(ids.length===1){
+      var p=pts[ids[0]];
+      start={a:{x:p.x,y:p.y},T:{x:T.x,y:T.y,scale:T.scale,rot:T.rot}};
+    } else {
+      var p1=pts[ids[0]],p2=pts[ids[1]];
+      start={
+        dist:Math.hypot(p2.x-p1.x,p2.y-p1.y),
+        ang:Math.atan2(p2.y-p1.y,p2.x-p1.x)*180/Math.PI,
+        mid:{x:(p1.x+p2.x)/2,y:(p1.y+p2.y)/2},
+        T:{x:T.x,y:T.y,scale:T.scale,rot:T.rot}
+      };
+    }
+  }
+
+  // ---------- lock ----------
+  var locked=false;
+  function setLock(v){
+    locked=v;
+    document.getElementById('lockBtn').classList.toggle('on',v);
+    dock.classList.toggle('hidden',v);
+    lockChip.style.display = v?'flex':'none';
+    wrap.style.touchAction = v?'auto':'none';
+    // when locked, ignore touches so you can rest the phone / trace freely
+    wrap.style.pointerEvents = v?'none':'auto';
+  }
+  document.getElementById('lockBtn').addEventListener('click', function(){ if(photoSrc) setLock(true); });
+  lockChip.addEventListener('click', function(){ setLock(false); });
+
+})();
+</script>
+</body>
+</html>
